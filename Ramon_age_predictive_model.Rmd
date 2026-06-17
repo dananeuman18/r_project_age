@@ -1,0 +1,820 @@
+---
+title: "age_predictive_modeling"
+output: pdf_document
+date: "2026-06-06"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Libraries
+
+```{r packages, message=FALSE}
+library(data.table)
+library(ggplot2)
+library(caret)
+library(car)
+library(randomForest)
+library(rpart)
+library(tidyverse)
+library(pROC)
+library(MLmetrics)
+library(glmnet)
+library(MASS)
+library(GGally)
+library(earth)
+library(Hmisc)
+
+set.seed(123)
+```
+
+# Load the Data
+
+```{r}
+file_path <- file.choose()
+```
+
+# Inspecting the Data
+
+```{r load-data}
+nhanes <- fread(file_path)
+
+cat("Dimensions of dataset:", dim(nhanes))
+```
+# Preprocessing the Data 
+
+```{r format}
+# Data preprocessing for Classification
+nhanes$age_group <- as.factor(nhanes$age_group)
+
+nhanes$RIAGENDR <- as.factor(nhanes$RIAGENDR)
+nhanes$PAQ605 <- as.factor(nhanes$PAQ605)
+nhanes$DIQ010 <- as.factor(nhanes$DIQ010)
+
+# Data preprocessing for Regression
+reg_data <- reg_data <- nhanes[, .( RIDAGEYR, RIAGENDR, PAQ605, BMXBMI, LBXGLU, 
+                                    DIQ010, LBXGLT, LBXIN )]
+
+reg_data$RIAGENDR <- as.factor(reg_data$RIAGENDR)
+reg_data$PAQ605 <- as.factor(reg_data$PAQ605)
+reg_data$DIQ010 <- as.factor(reg_data$DIQ010)
+
+# Examining Data after Data Type Transformation
+str(nhanes)
+```
+```{r missing-value-check}
+# Check for missing values, no imputation needed
+colSums(is.na(nhanes))
+```
+```{r}
+# Examining for Degenerate Distributions
+nzv <- nearZeroVar(nhanes, names = TRUE)
+nzv
+table(reg_data$DIQ010)
+```
+
+
+# Exploratory Data Analysis 
+
+
+```{r, warning=FALSE}
+summary(nhanes)
+```
+
+## For Regression
+
+```{r, warning=FALSE}
+hist.data.frame(reg_data[, .(RIDAGEYR, BMXBMI, LBXGLU, LBXGLT, LBXIN)])
+```
+```{r}
+pairs(reg_data[, .(RIDAGEYR, BMXBMI, LBXGLU, LBXGLT, LBXIN)])
+```
+```{r boxplots for continuous variables by age}
+reg_data$age_bin <- cut(reg_data$RIDAGEYR, breaks = seq(10, 80, by = 10))
+
+par(mfrow = c(1,3))
+boxplot(LBXGLU ~ age_bin, data = reg_data,
+        xlab = "Age Group (years)", ylab = "Glucose after fasting",
+        main = "Fasting Glucose by Age Group")
+
+boxplot(LBXIN ~ age_bin, data = reg_data,
+        xlab = "Age Group (years)", ylab = "Blood Insulin Level",
+        main = "Insulin Level by Age Group")
+
+boxplot(BMXBMI ~ age_bin, data = reg_data,
+        xlab = "Age Group (years)", ylab = "BMI",
+        main = "BMI by Age Group")
+
+```
+```{r boxplot for categorical predictors}
+par(mfrow = c(1,3))
+
+boxplot(RIDAGEYR ~ DIQ010, data = reg_data, subset = DIQ010 != 7 & DIQ010 != 9,
+        xlab = "Diabetes Status (1 = Yes, 2 = No, 3 = Borderline)", ylab = "Age (years)",
+        main = "Age by Diabetes Status")
+
+boxplot(RIDAGEYR ~ PAQ605, data = reg_data, subset = PAQ605 != 7,
+        xlab = "Physical Activity (1 = Yes, 2 = No)", ylab = "Age (years)",
+        main = "Age by Physical Activity Status")
+
+boxplot(RIDAGEYR ~ RIAGENDR, data = reg_data,
+        xlab = "Gender (1 = Male, 2 = Female)", ylab = "Age (years)",
+        main = "Age by Gender")
+```
+
+## For Classification
+
+```{r distribution}
+table(nhanes$age_group)
+
+ggplot(nhanes, aes(x = age_group, fill = age_group)) +
+  geom_bar() +
+  scale_fill_manual(values = c("Adult" = "#4A7C8C", "Senior" = "#C97B63")) +
+  labs(
+    title = "Distribution of Age Group",
+    x = "Age Group",
+    y = "Count"
+  ) +
+  theme(legend.position = "none")
+```
+```{r bmi-box-plot}
+ggplot(nhanes, aes(x = age_group, y = BMXBMI)) +
+  geom_boxplot() +
+  labs(
+    title = "BMI by Age Group",
+    x = "Age Group",
+    y = "Body Mass Index"
+  )
+```
+```{r fasting-glucose-boxplot}
+ggplot(nhanes, aes(x = age_group, y = LBXGLU)) +
+  geom_boxplot() +
+  labs(
+    title = "Fasting Glucose by Age Group",
+    x = "Age Group",
+    y = "Fasting Glucose"
+  )
+```
+```{r oral-glucose-boxplot}
+ggplot(nhanes, aes(x = age_group, y = LBXGLT)) +
+  geom_boxplot() +
+  labs(
+    title = "Oral Glucose Tolerance by Age Group",
+    x = "Age Group",
+    y = "Oral Glucose Tolerance"
+  )
+```
+```{r insulin-level-box-plot}
+ggplot(nhanes, aes(x = age_group, y = LBXIN)) +
+  geom_boxplot() +
+  labs(
+    title = "Insulin Level by Age Group",
+    x = "Age Group",
+    y = "Blood Insulin Level"
+  )
+```
+```{r age-gender-distribution}
+ggplot(nhanes, aes(x = RIAGENDR, fill = age_group)) +
+  geom_bar(position = "dodge") +
+  labs(
+    title = "Age Group by Gender",
+    x = "Gender: 1 = Male, 2 = Female",
+    y = "Count",
+    fill = "Age Group"
+  )
+```
+```{r age-physical-distribution}
+ggplot(nhanes, aes(x = PAQ605, fill = age_group)) +
+  geom_bar(position = "dodge") +
+  labs(
+    title = "Age Group by Physical Activity",
+    x = "Physical Activity: 1 = Yes, 2 = No",
+    y = "Count",
+    fill = "Age Group"
+  )
+```
+```{r correlation-matrix}
+numeric_vars <- c("BMXBMI", "LBXGLU", "LBXGLT", "LBXIN")
+
+cor_matrix <- cor(nhanes[, ..numeric_vars])
+
+round(cor_matrix, 2)
+```
+```{r correlation-matrix}
+cor_long <- as.data.frame(as.table(cor_matrix))
+cor_long$label <- round(cor_long$Freq, 2)
+
+ggplot(cor_long, aes(x = Var1, y = Var2, fill = Freq)) +
+  geom_tile() +
+  geom_text(aes(label = label), size = 4) +
+  labs(
+    title = "Correlation Heatmap of Numeric Predictors",
+    x = "Variable",
+    y = "Variable",
+    fill = "Correlation"
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+# Modeling
+
+## For Regression
+
+## For Classification
+
+```{r vif}
+vif_model <- lm(
+  BMXBMI ~ LBXGLU + LBXGLT + LBXIN,
+  data = nhanes
+)
+
+vif_values <- vif(vif_model)
+
+vif_table <- data.frame(
+  variable = names(vif_values),
+  VIF = as.numeric(vif_values)
+)
+
+vif_table
+```
+```{r BMI-fasting-scatterplot}
+ggplot(nhanes, aes(x = BMXBMI, y = LBXGLU, color = age_group)) +
+  geom_point(alpha = 0.4) +
+  labs(
+    title = "BMI vs Fasting Glucose by Age Group",
+    x = "BMI",
+    y = "Fasting Glucose",
+    color = "Age Group"
+  )
+```
+# Splitting the Data
+
+```{r predictor-target-variable}
+# SEQN is an ID and excluded; RIDAGEYR is excluded as a predictor 
+# since age_group is derived from it, which would cause data leakage.
+
+# model data for age_group as target
+model_data <- nhanes[, .(
+  age_group,
+  RIAGENDR,
+  PAQ605,
+  BMXBMI,
+  LBXGLU,
+  DIQ010,
+  LBXGLT,
+  LBXIN
+)]
+
+# model data for age as target
+reg_model <- reg_data[, !"age_bin"]
+```
+
+
+```{r parition-data}
+# partitioning data before addressing the imbalance for age_group as target variable
+train_index <- createDataPartition(
+  model_data$age_group,
+  p = 0.8,
+  list = FALSE
+)
+
+# partitioning data before addressing the imbalance for age as target variable
+train_index_reg <- createDataPartition(
+  reg_model$RIDAGEYR,
+  p = 0.8,
+  list = FALSE
+)
+
+# target age
+train_reg <- reg_model[train_index_reg, ]
+test_reg <- reg_model[-train_index_reg, ]
+
+# target age_group
+train <- model_data[train_index, ]
+test <- model_data[-train_index, ]
+
+dim(train)
+dim(test)
+
+table(train$age_group)
+table(test$age_group)
+
+```
+# Modeling
+
+## Baseline Model for  Linear Regression
+```{r linear model age, warning=FALSE}
+ctrl_reg <- trainControl(method = "cv", number = 5)
+
+set.seed(123)
+lm_model <- train(
+  RIDAGEYR ~ .,
+  data = train_reg,
+  method = "lm",
+  trControl = ctrl_reg
+)
+
+summary(lm_model)
+```
+```{r linear regression predict}
+lm_pred <- predict(lm_model, newdata = test_reg)
+```
+
+## Basline Model for Logistic Regression
+```{r logistic-regression-model age_group}
+log_model <- glm(
+  age_group ~ RIAGENDR + PAQ605 + BMXBMI + LBXGLU +
+    DIQ010 + LBXGLT + LBXIN,
+  data = train,
+  family = binomial
+)
+
+summary(log_model)
+```
+```{r logistic-regression-predictions age_group}
+levels(train$age_group)
+
+log_prob <- predict(log_model, newdata = test, type = "response")
+
+log_pred <- ifelse(log_prob > 0.5, "Senior", "Adult")
+
+log_pred <- factor(log_pred, levels = levels(test$age_group))
+```
+## Baseline Model for Elastic Net
+```{r Elastic Net}
+set.seed(123)
+glmnet_model_reg <- train(
+  RIDAGEYR ~ .,
+  data = train_reg,
+  method = "glmnet",
+  trControl = ctrl_reg,
+  tuneGrid = expand.grid(
+    alpha = seq(0, 1, 0.2),
+    lambda = seq(0.01, 0.2, length = 10)
+  )
+)
+
+glmnet_model_reg
+```
+```{r prediction for Elastic Net}
+glmnet_pred <- predict(glmnet_model_reg, newdata = test_reg)
+```
+
+
+## Baseline Model for Decisiong Tree with Categorical Target Variable
+
+```{r decision-tree-model age_group}
+tree_control <- trainControl(method = "cv", number = 5)
+
+tree_model <- train(
+  age_group ~ RIAGENDR + PAQ605 + BMXBMI + LBXGLU +
+    DIQ010 + LBXGLT + LBXIN,
+  data = train,
+  method = "rpart",
+  trControl = tree_control,
+  tuneLength = 10
+)
+
+tree_model
+```
+
+## Baseline Model for MARS with continuous Target Variable
+```{r}
+set.seed(123)
+mars_model_reg <- train(
+  RIDAGEYR ~ .,
+  data = train_reg,
+  method = "earth",
+  trControl = ctrl_reg,
+  tuneGrid = expand.grid(
+    degree = 1:2,
+    nprune = seq(2, 20, by = 2)
+  )
+)
+
+mars_model_reg
+```
+```{r prediction for MARS}
+mars_pred <- predict(mars_model_reg, newdata = test_reg)
+```
+
+
+
+## Baseline Model for Random Forest with Categorical Target Variable
+
+```{r random-forest-model age_group}
+rf_control <- trainControl(method = "cv", number = 5)
+
+rf_model <- train(
+  age_group ~ RIAGENDR + PAQ605 + BMXBMI + LBXGLU +
+    DIQ010 + LBXGLT + LBXIN,
+  data = train,
+  method = "rf",
+  trControl = rf_control,
+  tuneLength = 5,
+  ntree = 200
+)
+
+rf_model
+```
+```{r original-model-predictions age_group}
+
+log_prob <- predict(log_model, newdata = test, type = "response")
+log_pred <- ifelse(log_prob > 0.5, "Senior", "Adult")
+log_pred <- factor(log_pred, levels = levels(test$age_group))
+
+tree_pred <- predict(tree_model, newdata = test)
+
+rf_pred <- predict(rf_model, newdata = test)
+```
+
+```{r original-model-evaluation-metrics age-group}
+
+log_cm <- confusionMatrix(log_pred, test$age_group)
+tree_cm <- confusionMatrix(tree_pred, test$age_group)
+rf_cm <- confusionMatrix(rf_pred, test$age_group)
+
+#log_cm
+#tree_cm
+#rf_cm
+```
+
+# Model Results
+
+## Model results for Binary Categorical Target Variable before Imbalance
+
+```{r}
+reg_results <- data.frame(
+  Model = c("Linear Regression", "Elastic Net", "MARS"),
+  RMSE = c(
+    RMSE(lm_pred, test_reg$RIDAGEYR),
+    RMSE(glmnet_pred, test_reg$RIDAGEYR),
+    RMSE(mars_pred, test_reg$RIDAGEYR)
+  ),
+  MAE = c(
+    MAE(lm_pred, test_reg$RIDAGEYR),
+    MAE(glmnet_pred, test_reg$RIDAGEYR),
+    MAE(mars_pred, test_reg$RIDAGEYR)
+  ),
+  Rsquared = c(
+    R2_Score(lm_pred, test_reg$RIDAGEYR),
+    R2_Score(glmnet_pred, test_reg$RIDAGEYR),
+    R2_Score(mars_pred, test_reg$RIDAGEYR)
+  )
+)
+
+reg_results
+```
+
+## Model results from our Binary Categorical Target Variable
+```{r original-model-performance age_group}
+
+model_results <- data.frame(
+  Model = c("Logistic Regression", "Decision Tree", "Random Forest"),
+  Accuracy = c(
+    log_cm$overall["Accuracy"],
+    tree_cm$overall["Accuracy"],
+    rf_cm$overall["Accuracy"]
+  ),
+  Kappa = c(
+    log_cm$overall["Kappa"],
+    tree_cm$overall["Kappa"],
+    rf_cm$overall["Kappa"]
+  ),
+  Sensitivity = c(
+    log_cm$byClass["Sensitivity"],
+    tree_cm$byClass["Sensitivity"],
+    rf_cm$byClass["Sensitivity"]
+  ),
+  Specificity = c(
+    log_cm$byClass["Specificity"],
+    tree_cm$byClass["Specificity"],
+    rf_cm$byClass["Specificity"]
+  )
+)
+
+model_results
+```
+```{r senior-focused-confusion-matrix age_group}
+log_cm_senior <- confusionMatrix(log_pred, test$age_group, positive = "Senior")
+tree_cm_senior <- confusionMatrix(tree_pred, test$age_group, positive = "Senior")
+rf_cm_senior <- confusionMatrix(rf_pred, test$age_group, positive = "Senior")
+```
+
+```{r senior-confusion-matrix age_group}
+# 5. Senior-focused comparison table
+
+senior_model_results <- data.frame(
+  Model = c("Logistic Regression", "Decision Tree", "Random Forest"),
+  Accuracy = c(
+    log_cm_senior$overall["Accuracy"],
+    tree_cm_senior$overall["Accuracy"],
+    rf_cm_senior$overall["Accuracy"]
+  ),
+  Kappa = c(
+    log_cm_senior$overall["Kappa"],
+    tree_cm_senior$overall["Kappa"],
+    rf_cm_senior$overall["Kappa"]
+  ),
+  Senior_Sensitivity = c(
+    log_cm_senior$byClass["Sensitivity"],
+    tree_cm_senior$byClass["Sensitivity"],
+    rf_cm_senior$byClass["Sensitivity"]
+  ),
+  Adult_Specificity = c(
+    log_cm_senior$byClass["Specificity"],
+    tree_cm_senior$byClass["Specificity"],
+    rf_cm_senior$byClass["Specificity"]
+  )
+)
+
+senior_model_results
+```
+```{r}
+varImp(mars_model_reg)
+plot(varImp(mars_model_reg))
+
+plot(test_reg$RIDAGEYR, mars_pred,
+     xlab = "Actual Age", ylab = "Predicted Age",
+     main = "MARS: Predicted vs. Actual Age")
+abline(0, 1, col = "red")
+```
+
+
+```{r original-confusion-matrix age_group}
+
+plot_confusion_matrix <- function(predictions, actual, model_name) {
+  
+  cm_table <- table(
+    Predicted = predictions,
+    Actual = actual
+  )
+  
+  cm_df <- as.data.frame(cm_table)
+  
+  ggplot(cm_df, aes(x = Actual, y = Predicted, fill = Freq)) +
+    geom_tile() +
+    geom_text(aes(label = Freq), size = 6) +
+    labs(
+      title = paste(model_name, "Confusion Matrix"),
+      x = "Actual Age Group",
+      y = "Predicted Age Group",
+      fill = "Count"
+    )
+}
+
+plot_confusion_matrix(log_pred, test$age_group, "Logistic Regression")
+plot_confusion_matrix(tree_pred, test$age_group, "Decision Tree")
+plot_confusion_matrix(rf_pred, test$age_group, "Random Forest")
+```
+```{r}
+rf_importance <- varImp(rf_model)
+
+rf_importance
+plot(rf_importance)
+```
+```{r balance-training-data}
+
+table(train$age_group)
+
+train_balanced <- upSample(
+  x = train[, c("RIAGENDR", "PAQ605", "BMXBMI", "LBXGLU", "DIQ010", "LBXGLT", "LBXIN")],
+  y = train$age_group,
+  yname = "age_group"
+)
+
+table(train_balanced$age_group)
+dim(train_balanced)
+```
+```{r balance-logistic-regression}
+log_model_balanced <- glm(
+  age_group ~ RIAGENDR + PAQ605 + BMXBMI + LBXGLU +
+    DIQ010 + LBXGLT + LBXIN,
+  data = train_balanced,
+  family = binomial
+)
+
+log_prob_balanced <- predict(log_model_balanced, newdata = test, type = "response")
+
+log_pred_balanced <- ifelse(log_prob_balanced > 0.5, "Senior", "Adult")
+
+log_pred_balanced <- factor(
+  log_pred_balanced,
+  levels = levels(test$age_group)
+)
+```
+
+```{r balanced-decision-tree}
+tree_model_balanced <- train(
+  age_group ~ RIAGENDR + PAQ605 + BMXBMI + LBXGLU +
+    DIQ010 + LBXGLT + LBXIN,
+  data = train_balanced,
+  method = "rpart",
+  trControl = trainControl(method = "cv", number = 5),
+  tuneLength = 10
+)
+
+tree_pred_balanced <- predict(tree_model_balanced, newdata = test)
+
+tree_model_balanced
+```
+
+```{r balanced-random-forest}
+rf_model_balanced <- train(
+  age_group ~ RIAGENDR + PAQ605 + BMXBMI + LBXGLU +
+    DIQ010 + LBXGLT + LBXIN,
+  data = train_balanced,
+  method = "rf",
+  trControl = trainControl(method = "cv", number = 5),
+  tuneLength = 5,
+  ntree = 200
+)
+
+rf_pred_balanced <- predict(rf_model_balanced, newdata = test)
+
+rf_model_balanced
+```
+
+```{r balanced-model-results}
+log_cm_balanced <- confusionMatrix(
+  log_pred_balanced,
+  test$age_group,
+  positive = "Senior"
+)
+
+tree_cm_balanced <- confusionMatrix(
+  tree_pred_balanced,
+  test$age_group,
+  positive = "Senior"
+)
+
+rf_cm_balanced <- confusionMatrix(
+  rf_pred_balanced,
+  test$age_group,
+  positive = "Senior"
+)
+
+balanced_results <- data.frame(
+  Model = c("Balanced Logistic Regression", "Balanced Decision Tree", "Balanced Random Forest"),
+  Accuracy = c(
+    log_cm_balanced$overall["Accuracy"],
+    tree_cm_balanced$overall["Accuracy"],
+    rf_cm_balanced$overall["Accuracy"]
+  ),
+  Kappa = c(
+    log_cm_balanced$overall["Kappa"],
+    tree_cm_balanced$overall["Kappa"],
+    rf_cm_balanced$overall["Kappa"]
+  ),
+  Senior_Sensitivity = c(
+    log_cm_balanced$byClass["Sensitivity"],
+    tree_cm_balanced$byClass["Sensitivity"],
+    rf_cm_balanced$byClass["Sensitivity"]
+  ),
+  Adult_Specificity = c(
+    log_cm_balanced$byClass["Specificity"],
+    tree_cm_balanced$byClass["Specificity"],
+    rf_cm_balanced$byClass["Specificity"]
+  )
+)
+
+balanced_results
+```
+
+```{r confusion matrix for balanced results of random forest}
+rf_pred_balanced_releveled <- factor(rf_pred_balanced, levels = c("Senior", "Adult"))
+test_age_group_releveled <- factor(test$age_group, levels = c("Senior", "Adult"))
+
+cm_table <- table(
+  Predicted = rf_pred_balanced_releveled,
+  Actual = test_age_group_releveled
+)
+
+cm_df <- as.data.frame(cm_table)
+
+cm_df$Result <- c("True Positive", "False Negative", "False Positive", "True Negative")
+
+ggplot(cm_df, aes(x = Actual, y = Predicted, fill = Freq)) +
+  geom_tile() +
+  geom_text(aes(label = paste0(Result, "\n(", Freq, ")")), size = 4.5) +
+  labs(
+    title = "Balanced Random Forest Confusion Matrix",
+    x = "Actual Age Group",
+    y = "Predicted Age Group",
+    fill = "Count"
+  )
+```
+
+
+```{r balanced-original-comparison}
+all_model_results <- rbind(
+  senior_model_results,
+  balanced_results
+)
+
+all_model_results
+```
+
+```{r roc-auc-curves}
+log_prob_balanced_roc <- predict(log_model_balanced, newdata = test, type = "response")
+tree_prob_balanced <- predict(tree_model_balanced, newdata = test, type = "prob")[, "Senior"]
+rf_prob_balanced <- predict(rf_model_balanced, newdata = test, type = "prob")[, "Senior"]
+
+roc_log <- roc(test$age_group, log_prob_balanced_roc, levels = c("Adult", "Senior"))
+roc_tree <- roc(test$age_group, tree_prob_balanced, levels = c("Adult", "Senior"))
+roc_rf <- roc(test$age_group, rf_prob_balanced, levels = c("Adult", "Senior"))
+
+plot(roc_log, col = "#4A7C8C",
+     legacy.axes = TRUE,
+     main = "ROC Curves for Balanced Models",
+     xlab = "False Positive Rate", ylab = "True Positive Rate")
+lines(roc_tree, col = "#C97B63")
+lines(roc_rf, col = "#6A994E")
+abline(a = 0, b = 1, lty = 2, col = "gray")
+
+legend("bottomright",
+       legend = c(
+         paste0("Logistic Regression (AUC = ", round(auc(roc_log), 3), ")"),
+         paste0("Decision Tree (AUC = ", round(auc(roc_tree), 3), ")"),
+         paste0("Random Forest (AUC = ", round(auc(roc_rf), 3), ")")
+       ),
+       col = c("#4A7C8C", "#C97B63", "#6A994E"),
+       lwd = 2)
+```
+
+```{r}
+reg_results_by_age <- data.frame(
+  actual_age = test_reg$RIDAGEYR,
+  predicted_age = as.numeric(mars_pred)
+)
+
+reg_results_by_age$age_band <- cut(reg_results_by_age$actual_age, breaks = seq(10, 80, by = 10))
+
+reg_results_by_age |>
+  dplyr::group_by(age_band) |>
+  dplyr::summarise(RMSE = sqrt(mean((actual_age - predicted_age)^2)))
+```
+
+```{r rmse-by-age-band}
+rmse_by_band <- reg_results_by_age |>
+  dplyr::group_by(age_band) |>
+  dplyr::summarise(RMSE = sqrt(mean((actual_age - predicted_age)^2))) |>
+  dplyr::filter(!is.na(age_band))
+
+ggplot(rmse_by_band, aes(x = age_band, y = RMSE)) +
+  geom_col(fill = "#4A7C8C") +
+  geom_text(aes(label = round(RMSE, 1)), vjust = -0.4, size = 3.5) +
+  labs(
+    title = "MARS Model: RMSE by Age Band",
+    x = "Age Band (years)",
+    y = "RMSE"
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r feature-importance-comparison}
+# Logistic Regression - glm object needs different extraction
+imp_log_raw <- varImp(log_model_balanced)
+imp_log <- data.frame(
+  Variable = rownames(imp_log_raw),
+  Importance = imp_log_raw$Overall,
+  Model = "Logistic Regression"
+)
+
+# Decision Tree - caret object
+imp_tree_raw <- varImp(tree_model_balanced)$importance
+imp_tree <- data.frame(
+  Variable = rownames(imp_tree_raw),
+  Importance = imp_tree_raw$Overall,
+  Model = "Decision Tree"
+)
+
+# Random Forest - caret object
+imp_rf_raw <- varImp(rf_model_balanced)$importance
+imp_rf <- data.frame(
+  Variable = rownames(imp_rf_raw),
+  Importance = imp_rf_raw$Overall,
+  Model = "Random Forest"
+)
+
+imp_all <- rbind(imp_log, imp_tree, imp_rf)
+
+ggplot(imp_all, aes(x = reorder(Variable, Importance), y = Importance, fill = Model)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ Model, scales = "free_x") +
+  coord_flip() +
+  scale_fill_manual(values = c(
+    "Logistic Regression" = "#4A7C8C",
+    "Decision Tree" = "#C97B63",
+    "Random Forest" = "#6A994E"
+  )) +
+  labs(
+    title = "Variable Importance by Model",
+    x = "Variable",
+    y = "Importance"
+  )
+```
+
+
+
+
